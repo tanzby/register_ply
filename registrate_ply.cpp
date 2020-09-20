@@ -5,7 +5,7 @@
 
 
 #include <pcl/io/ply_io.h>
-#include <pcl/io/ply_io.h>
+#include <pcl/octree/octree_pointcloud_occupancy.h>
 #include <pcl/registration/correspondence_estimation.h>
 #include <pcl/registration/transforms.h>
 #include <pcl/features/normal_3d_omp.h>
@@ -76,7 +76,7 @@ compute_cloud_resolution(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud)
 
     for (size_t i = 0; i < cloud->size(); ++i)
     {
-        if (! pcl_isfinite((*cloud)[i].x))
+        if (! pcl::isFinite(cloud->points[i]))
             continue;
 
         // Considering the second neighbor since the first is the point itself.
@@ -146,7 +146,7 @@ find_match(pcl::PointCloud<pcl::FPFHSignature33>::Ptr model_descriptors,
         std::vector<int> neighbors(1);
         std::vector<float> squaredDistances(1);
         // Ignore NaNs.
-        if (pcl_isfinite(target_descriptors->at(i).histogram[0]   ))
+        if (std::isfinite(target_descriptors->at(i).histogram[0]))
         {
             int neighborCount = matching.nearestKSearch(target_descriptors->at(i), 1, neighbors, squaredDistances);
             if (neighborCount == 1 && squaredDistances[0] < 0.1f)
@@ -200,6 +200,39 @@ estimation_pose(pcl::PointCloud<PointT>::Ptr source, pcl::PointCloud<PointT>::Pt
     return false;
 }
 
+void evaluation(pcl::PointCloud<pcl::PointXYZ>::Ptr source, pcl::PointCloud<pcl::PointXYZ>::Ptr target)
+{
+    pcl::octree::OctreePointCloudOccupancy<PointT> occupancy_checker(0.02);
+    occupancy_checker.setOccupiedVoxelsAtPointsFromCloud(target);
+
+    size_t is_in_counter = 0;
+
+    for (size_t i = 0; i < source->points.size(); ++i)
+    {
+        if (occupancy_checker.isVoxelOccupiedAtPoint(source->points[i]))
+        {
+            is_in_counter++;
+        }
+    }
+
+    cout << "total size of source: " << source->size() << endl;
+    cout << "total size of target: " << target->size() << endl;
+    cout << "hit count: " << is_in_counter << endl;
+}
+
+void transformPointCloudSim3(const pcl::PointCloud<PointT> &cloud_in,
+                             pcl::PointCloud<PointT> &cloud_out, double scale, const Eigen::Vector3f &offset,
+                             const Eigen::Quaternionf &rotation)
+{
+    pcl::transformPointCloud(cloud_in, cloud_out, {0, 0, 0}, rotation);
+    for (auto&p: cloud_out.points)
+    {
+        p.x = scale * p.x + offset[0];
+        p.y = scale * p.y + offset[1];
+        p.z = scale * p.z + offset[2];
+    }
+}
+
 
 int main(int argc, char** argv)
 {
@@ -211,28 +244,37 @@ int main(int argc, char** argv)
     // read ply
     pcl::PointCloud<PointT>::Ptr source ( new pcl::PointCloud<PointT> );
     pcl::PointCloud<PointT>::Ptr target( new pcl::PointCloud<PointT> );
+    pcl::PointCloud<PointT>::Ptr source_filtered ( new pcl::PointCloud<PointT> );
+    pcl::PointCloud<PointT>::Ptr target_filtered( new pcl::PointCloud<PointT> );
     pcl::PointCloud<PointT>::Ptr source_transform ( new pcl::PointCloud<PointT> );
+    pcl::PointCloud<PointT>::Ptr source_transform_filtered ( new pcl::PointCloud<PointT> );
 
     if (pcl::io::loadPLYFile(argv[1], *source) == -1)
     {
         cerr << "cannot load source" << endl;
         return 0;
     }
+    else cout << "load " << source->size() <<" source points from file.\n";
+
     if (pcl::io::loadPLYFile(argv[2], *target) == -1)
     {
-        cerr << "cannot load source" << endl;
+        cerr << "cannot load target" << endl;
         return 0;
     }
+    else cout << "load " << target->size() <<" target points from file.\n";
 
     //downsampling
     pcl::VoxelGrid<PointT> voxel_filter;
     voxel_filter.setLeafSize(0.1, 0.1, 0.1);
     voxel_filter.setInputCloud(source);
-    voxel_filter.filter(*source);
+    voxel_filter.filter(*source_filtered);
 
     voxel_filter.setLeafSize(0.05, 0.05, 0.05);
     voxel_filter.setInputCloud(target);
-    voxel_filter.filter(*target);
+    voxel_filter.filter(*target_filtered);
+
+    cout << "down-sample source points to " << source_filtered->size() << endl;
+    cout << "down-sample target points to " << target_filtered->size() << endl;
 
     Eigen::Matrix4d init_transform;
 
@@ -243,20 +285,20 @@ int main(int argc, char** argv)
     0, 0, 0, 1;
 
 
-    int max_iter_times = 100;
+    int max_iter_times = 50;
 
     pcl::registration::CorrespondenceEstimation<PointT, PointT> corr_estimator;
-    corr_estimator.setInputTarget(target);
+    corr_estimator.setInputTarget(target_filtered);
 
 
     pcl::visualization::PCLVisualizer viewer("Step by step icp");
 
-    pcl::visualization::PointCloudColorHandlerCustom<PointT> source_cloud_color_handler(source, 255, 255, 255);
-    pcl::visualization::PointCloudColorHandlerCustom<PointT> target_cloud_color_handler(target, 230, 20, 0);
-    pcl::visualization::PointCloudColorHandlerCustom<PointT> result_cloud_color_handler(source, 0, 255,0);
+    pcl::visualization::PointCloudColorHandlerCustom<PointT> source_cloud_color_handler(source_filtered, 255, 255, 255);
+    pcl::visualization::PointCloudColorHandlerCustom<PointT> target_cloud_color_handler(target_filtered, 230, 20, 0);
+    pcl::visualization::PointCloudColorHandlerCustom<PointT> result_cloud_color_handler(source_filtered, 0, 255,0);
 
-    viewer.addPointCloud(source, source_cloud_color_handler,  "source");
-    viewer.addPointCloud(target, target_cloud_color_handler,  "target");
+    viewer.addPointCloud(source_filtered, source_cloud_color_handler,  "source");
+    viewer.addPointCloud(target_filtered, target_cloud_color_handler,  "target");
 
     viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "source");
     viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "target");
@@ -273,25 +315,19 @@ int main(int argc, char** argv)
 
 
         // transform
-        pcl::transformPointCloud(*source, *source_transform, {0, 0, 0}, q.cast<float>());
-        for (auto&p: source_transform->points)
-        {
-            p.x = scale[0] * p.x + t[0];
-            p.y = scale[0] * p.y + t[1];
-            p.z = scale[0] * p.z + t[2];
-        }
+        transformPointCloudSim3(*source_filtered, *source_transform_filtered, scale[0], t.cast<float>(), q.cast<float>());
 
         // compute normal
         pcl::PointCloud<pcl::Normal>::Ptr source_normals(new pcl::PointCloud<pcl::Normal>);
         pcl::PointCloud<pcl::Normal>::Ptr target_normals(new pcl::PointCloud<pcl::Normal>);
-        estimate_normals(source_transform, source_normals);
-        estimate_normals(target, target_normals);
+        estimate_normals(source_transform_filtered, source_normals);
+        estimate_normals(target_filtered, target_normals);
 
         // compute iss
         pcl::PointCloud<PointT>::Ptr source_iss_points(new pcl::PointCloud<PointT>);
         pcl::PointCloud<PointT>::Ptr target_iss_points(new pcl::PointCloud<PointT>);
-        compute_iss(source_transform, source_iss_points);
-        compute_iss(target, target_iss_points);
+        compute_iss(source_transform_filtered, source_iss_points);
+        compute_iss(target_filtered, target_iss_points);
 
         {
             std::lock_guard<std::mutex>  lock(update_cloud_mutex);
@@ -304,32 +340,27 @@ int main(int argc, char** argv)
             viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 7, "target_iss_points");
         }
 
-        pcl::PointCloud<pcl::FPFHSignature33>::Ptr source_descriptors_fpfh(new pcl::PointCloud<pcl::FPFHSignature33>());  // pfh特征
+        pcl::PointCloud<pcl::FPFHSignature33>::Ptr source_descriptors_fpfh(new pcl::PointCloud<pcl::FPFHSignature33>());
         pcl::PointCloud<pcl::FPFHSignature33>::Ptr target_descriptors_fpfh(new pcl::PointCloud<pcl::FPFHSignature33>());
-        compute_pfh(source_iss_points, source_transform, source_normals, source_descriptors_fpfh);
-        compute_pfh(target_iss_points, target, target_normals, target_descriptors_fpfh);
+        compute_pfh(source_iss_points, source_transform_filtered, source_normals, source_descriptors_fpfh);
+        compute_pfh(target_iss_points, target_filtered, target_normals, target_descriptors_fpfh);
 
         pcl::PointCloud<PointT>::Ptr aligned_result(new pcl::PointCloud<PointT>);
         Eigen::Matrix4d  out_result;
-        if(estimation_pose(source_iss_points, target_iss_points, source_descriptors_fpfh, target_descriptors_fpfh, aligned_result, out_result))
+        if(estimation_pose(source_iss_points, target_iss_points,
+                           source_descriptors_fpfh, target_descriptors_fpfh, aligned_result, out_result))
         {
             t = out_result.block<3, 1>(0, 3);
             q = out_result.topLeftCorner<3, 3>();
         }
 
         // transform
-        pcl::transformPointCloud(*source, *source_transform, {0, 0, 0}, q.cast<float>());
-        for (auto&p: source_transform->points)
-        {
-            p.x = scale[0] * p.x + t[0];
-            p.y = scale[0] * p.y + t[1];
-            p.z = scale[0] * p.z + t[2];
-        }
+        transformPointCloudSim3(*source_filtered, *source_transform_filtered, scale[0], t.cast<float>(), q.cast<float>());
 
         {
             std::lock_guard<std::mutex> lock(update_cloud_mutex);
             viewer.removePointCloud("result");
-            viewer.addPointCloud(source_transform, result_cloud_color_handler,  "result");
+            viewer.addPointCloud(source_transform_filtered, result_cloud_color_handler,  "result");
 
             viewer.removePointCloud("source_iss_points");
             viewer.removePointCloud("target_iss_points");
@@ -343,8 +374,8 @@ int main(int argc, char** argv)
                  << iter << " ========================================= \n\n";
 
             // transform
-            pcl::transformPointCloud(*source, *source_transform, {0, 0, 0}, q.cast<float>());
-            for (auto&p: source_transform->points)
+            pcl::transformPointCloud(*source_filtered, *source_transform_filtered, {0, 0, 0}, q.cast<float>());
+            for (auto&p: source_transform_filtered->points)
             {
                 p.x = scale[0] * p.x + t[0];
                 p.y = scale[0] * p.y + t[1];
@@ -354,11 +385,11 @@ int main(int argc, char** argv)
             {
                 std::lock_guard<std::mutex> lock(update_cloud_mutex);
                 viewer.removePointCloud("result");
-                viewer.addPointCloud(source_transform, result_cloud_color_handler,  "result");
+                viewer.addPointCloud(source_transform_filtered, result_cloud_color_handler,  "result");
             }
 
             // find correspondences
-            corr_estimator.setInputSource(source_transform);
+            corr_estimator.setInputSource(source_transform_filtered);
             pcl::CorrespondencesPtr correspondences(new pcl::Correspondences);
             corr_estimator.determineCorrespondences(*correspondences);
 
@@ -370,16 +401,19 @@ int main(int argc, char** argv)
             problem.AddParameterBlock(q.coeffs().data(), 4, q_parameterization);
             problem.AddParameterBlock(t.data(), 3);
 
-            ceres::LossFunction* loss_function = new ceres::HuberLoss(5.999 / source->size() );
-            if (iter < 40) loss_function = nullptr;
+            ceres::LossFunction* loss_function = new ceres::CauchyLoss(sqrt( 1.0 / correspondences->size()));
+            if (iter < max_iter_times * 0.4) loss_function = nullptr;
 
+            ceres::Problem::EvaluateOptions evaluate_options;
             for (auto& c: *correspondences)
             {
                 ceres::CostFunction *cost_function;
-                cost_function = Point2PointFactor::Create(source->points[c.index_query],
-                                                          target->points[c.index_match]);
+                cost_function = Point2PointFactor::Create(source_filtered->points[c.index_query],
+                                                          target_filtered->points[c.index_match]);
 
-                problem.AddResidualBlock(cost_function, loss_function, scale.data(), q.coeffs().data(), t.data());
+                auto res_id = problem.AddResidualBlock(cost_function, loss_function, scale.data(), q.coeffs().data(), t.data());
+
+                if (iter == max_iter_times - 1) evaluate_options.residual_blocks.emplace_back(res_id);
             }
 
             ceres::Solver::Options options;
@@ -394,6 +428,13 @@ int main(int argc, char** argv)
             cout << "scale:" << scale << endl;
             cout << "R:\n" << q.toRotationMatrix() << endl;
             cout << "t:" << t.transpose() << endl;
+
+            // reach the end of iteration
+            if (iter == max_iter_times - 1)
+            {
+                transformPointCloudSim3(*source, *source_transform, scale[0], t.cast<float>(), q.cast<float>());
+                evaluation(source_transform, target);
+            }
         }
 
      }
